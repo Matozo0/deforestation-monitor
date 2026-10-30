@@ -185,8 +185,14 @@ fn process_initial_scene(
 }
 
 fn process_flood_fill(mask: &[u8], size: usize, _debug: bool) -> (Vec<u32>, u32) {
+    process_flood_fill_rect(mask, size, size)
+}
+
+fn process_flood_fill_rect(mask: &[u8], width: usize, height: usize) -> (Vec<u32>, u32) {
+    assert_eq!(mask.len(), width * height);
     let mut labels = vec![0u32; mask.len()];
     let mut current_label = 0u32;
+    let mut max_queue = 0usize;
 
     let directions = [
         (-1, 0), // cima
@@ -195,9 +201,9 @@ fn process_flood_fill(mask: &[u8], size: usize, _debug: bool) -> (Vec<u32>, u32)
         (0, 1),  // direita
     ];
 
-    for row in 0..size {
-        for col in 0..size {
-            let index = row * size + col;
+    for row in 0..height {
+        for col in 0..width {
+            let index = row * width + col;
 
             if mask[index] == 0 || labels[index] != 0 {
                 continue;
@@ -208,45 +214,55 @@ fn process_flood_fill(mask: &[u8], size: usize, _debug: bool) -> (Vec<u32>, u32)
             let mut queue = VecDeque::new();
             labels[index] = current_label;
             queue.push_back((row, col));
+            max_queue = max_queue.max(queue.len());
 
             while let Some((r, c)) = queue.pop_front() {
                 for (dr, dc) in directions {
                     let nr = r as isize + dr;
                     let nc = c as isize + dc;
 
-                    if nr < 0 || nc < 0 || nr >= size as isize || nc >= size as isize {
+                    if nr < 0 || nc < 0 || nr >= height as isize || nc >= width as isize {
                         continue;
                     }
 
                     let nr = nr as usize;
                     let nc = nc as usize;
-                    let nindex = nr * size + nc;
+                    let nindex = nr * width + nc;
 
                     if mask[nindex] == 1 && labels[nindex] == 0 {
                         labels[nindex] = current_label;
 
                         queue.push_back((nr, nc));
+                        max_queue = max_queue.max(queue.len());
                     }
                 }
             }
         }
     }
+    if mask.len() > SIZE * SIZE {
+        println!("Maior fila observada no Flood Fill global: {max_queue} pixels");
+    }
     (labels, current_label)
 }
 
 fn process_edge(mask: &[u8], size: usize) -> Vec<Edge> {
+    process_edge_rect(mask, size, size)
+}
+
+fn process_edge_rect(mask: &[u8], width: usize, height: usize) -> Vec<Edge> {
+    assert_eq!(mask.len(), width * height);
     let mut edges: Vec<Edge> = Vec::new();
 
-    for i in 0..size {
-        for j in 0..size {
-            let index = i * size + j;
+    for i in 0..height {
+        for j in 0..width {
+            let index = i * width + j;
 
             if mask[index] == 0 {
                 continue;
             }
 
             // Aresta cima
-            if i == 0 || mask[(i - 1) * size + j] == 0 {
+            if i == 0 || mask[(i - 1) * width + j] == 0 {
                 let edge = Edge {
                     start: Point { x: j, y: i },
                     end: Point { x: j + 1, y: i },
@@ -254,7 +270,7 @@ fn process_edge(mask: &[u8], size: usize) -> Vec<Edge> {
                 edges.push(edge);
             }
             // Aresta baixo
-            if i + 1 == size || mask[(i + 1) * size + j] == 0 {
+            if i + 1 == height || mask[(i + 1) * width + j] == 0 {
                 let edge = Edge {
                     start: Point { x: j + 1, y: i + 1 },
                     end: Point { x: j, y: i + 1 },
@@ -262,7 +278,7 @@ fn process_edge(mask: &[u8], size: usize) -> Vec<Edge> {
                 edges.push(edge);
             }
             // Aresta esquerda
-            if j == 0 || mask[i * size + (j - 1)] == 0 {
+            if j == 0 || mask[i * width + (j - 1)] == 0 {
                 let edge = Edge {
                     start: Point { x: j, y: i + 1 },
                     end: Point { x: j, y: i },
@@ -270,7 +286,7 @@ fn process_edge(mask: &[u8], size: usize) -> Vec<Edge> {
                 edges.push(edge);
             }
             // Aresta direita
-            if j + 1 == size || mask[i * size + (j + 1)] == 0 {
+            if j + 1 == width || mask[i * width + (j + 1)] == 0 {
                 let edge = Edge {
                     start: Point { x: j + 1, y: i },
                     end: Point { x: j + 1, y: i + 1 },
@@ -520,7 +536,8 @@ fn utm_to_latlon(easting: f64, northing: f64, crs: UtmCrs) -> (f64, f64) {
 
 fn show_geographic_coordinates(
     path: &str,
-    size: usize,
+    width: usize,
+    height: usize,
     row_offset: usize,
     col_offset: usize,
     contours: &[Vec<Point>],
@@ -542,14 +559,20 @@ fn show_geographic_coordinates(
     );
     for (name, point) in [
         ("Canto superior esquerdo", Point { x: 0, y: 0 }),
-        ("Canto superior direito", Point { x: size, y: 0 }),
-        ("Canto inferior esquerdo", Point { x: 0, y: size }),
-        ("Canto inferior direito", Point { x: size, y: size }),
+        ("Canto superior direito", Point { x: width, y: 0 }),
+        ("Canto inferior esquerdo", Point { x: 0, y: height }),
+        (
+            "Canto inferior direito",
+            Point {
+                x: width,
+                y: height,
+            },
+        ),
         (
             "Centro aproximado",
             Point {
-                x: size / 2,
-                y: size / 2,
+                x: width / 2,
+                y: height / 2,
             },
         ),
     ] {
@@ -590,6 +613,7 @@ const T2_B04: &str = "./data/t2/B04.tif";
 const T2_B08: &str = "./data/t2/B08.tif";
 const T2_SCL: &str = "./data/t2/SCL.tif";
 const OUT: &str = "./resultado_temporal";
+const GLOBAL_OUT: &str = "./resultado_global_temporal";
 
 struct Comparison {
     classes: Vec<u8>,
@@ -647,6 +671,138 @@ fn compare_scenes(before: &SceneMasks, after: &SceneMasks) -> Comparison {
         };
     }
     comparison
+}
+
+const STATE_INVALID: u8 = 0;
+const STATE_STABLE_VEGETATION: u8 = 1;
+const STATE_LOSS: u8 = 2;
+const STATE_GAIN: u8 = 3;
+const STATE_STABLE_NONVEGETATION: u8 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Block {
+    row: usize,
+    col: usize,
+    width: usize,
+    height: usize,
+}
+
+fn blocks(width: usize, height: usize, block_size: usize) -> Vec<Block> {
+    assert!(block_size > 0);
+    let mut result = Vec::new();
+    for row in (0..height).step_by(block_size) {
+        for col in (0..width).step_by(block_size) {
+            result.push(Block {
+                row,
+                col,
+                width: (width - col).min(block_size),
+                height: (height - row).min(block_size),
+            });
+        }
+    }
+    result
+}
+
+fn copy_block_to_global(global: &mut [u8], global_width: usize, block: Block, local: &[u8]) {
+    assert_eq!(local.len(), block.width * block.height);
+    for local_row in 0..block.height {
+        for local_col in 0..block.width {
+            let global_row = block.row + local_row;
+            let global_col = block.col + local_col;
+            let global_index = global_row * global_width + global_col;
+            let local_index = local_row * block.width + local_col;
+            global[global_index] = local[local_index];
+        }
+    }
+}
+
+struct BlockMasks {
+    valid: Vec<u8>,
+    vegetation: Vec<u8>,
+}
+
+struct SceneReaders {
+    b04: TiffFile,
+    b08: TiffFile,
+    scl: TiffFile,
+}
+
+impl SceneReaders {
+    fn open(b04_path: &str, b08_path: &str, scl_path: &str) -> Result<Self, String> {
+        Ok(Self {
+            b04: TiffFile::open(b04_path).map_err(|error| format!("Erro abrindo B04: {error}"))?,
+            b08: TiffFile::open(b08_path).map_err(|error| format!("Erro abrindo B08: {error}"))?,
+            scl: TiffFile::open(scl_path).map_err(|error| format!("Erro abrindo SCL: {error}"))?,
+        })
+    }
+}
+
+fn process_scene_block(
+    readers: &SceneReaders,
+    row_offset: usize,
+    col_offset: usize,
+    width: usize,
+    height: usize,
+    threshold: i32,
+    offset_red: i32,
+    offset_nir: i32,
+) -> Result<BlockMasks, String> {
+    if row_offset % 2 != 0 || col_offset % 2 != 0 {
+        return Err("Janela desalinhada da grade SCL de 20 m".into());
+    }
+    let red: ndarray::ArrayD<u16> = readers
+        .b04
+        .read_window(0, row_offset, col_offset, height, width)
+        .map_err(|error| format!("Erro lendo janela B04: {error}"))?;
+    let nir: ndarray::ArrayD<u16> = readers
+        .b08
+        .read_window(0, row_offset, col_offset, height, width)
+        .map_err(|error| format!("Erro lendo janela B08: {error}"))?;
+    let scl_height = height.div_ceil(2);
+    let scl_width = width.div_ceil(2);
+    let scene_class: ndarray::ArrayD<u8> = readers
+        .scl
+        .read_window(0, row_offset / 2, col_offset / 2, scl_height, scl_width)
+        .map_err(|error| format!("Erro lendo janela SCL: {error}"))?;
+    let mut valid = vec![0u8; width * height];
+    let mut vegetation = vec![0u8; width * height];
+    for row in 0..height {
+        for col in 0..width {
+            let index = row * width + col;
+            let red_dn = red[[row, col]] as i32;
+            let nir_dn = nir[[row, col]] as i32;
+            if red_dn == 0 || nir_dn == 0 || !matches!(scene_class[[row / 2, col / 2]], 4 | 5) {
+                continue;
+            }
+            let red_value = red_dn + offset_red;
+            let nir_value = nir_dn + offset_nir;
+            let denominator = nir_value + red_value;
+            if denominator <= 0 {
+                continue;
+            }
+            valid[index] = 1;
+            let ndvi = ((nir_value - red_value) * 1000) / denominator;
+            vegetation[index] = u8::from(ndvi >= threshold);
+        }
+    }
+    Ok(BlockMasks { valid, vegetation })
+}
+
+fn compare_block(before: &BlockMasks, after: &BlockMasks) -> Vec<u8> {
+    assert_eq!(before.valid.len(), after.valid.len());
+    let mut states = vec![STATE_INVALID; before.valid.len()];
+    for (index, state) in states.iter_mut().enumerate() {
+        if before.valid[index] == 0 || after.valid[index] == 0 {
+            continue;
+        }
+        *state = match (before.vegetation[index], after.vegetation[index]) {
+            (1, 1) => STATE_STABLE_VEGETATION,
+            (1, 0) => STATE_LOSS,
+            (0, 1) => STATE_GAIN,
+            _ => STATE_STABLE_NONVEGETATION,
+        };
+    }
+    states
 }
 
 fn same_float(x: f64, y: f64) -> bool {
@@ -735,6 +891,82 @@ fn check_temporal_grid(before_path: &str, after_path: &str) -> Result<f64, Strin
         }
     }
     Ok((x.pixel_width * x.pixel_height - x.skew_x * x.skew_y).abs())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommonGrid {
+    width: usize,
+    height: usize,
+    t1_row: usize,
+    t1_col: usize,
+    t2_row: usize,
+    t2_col: usize,
+    pixel_area_m2: f64,
+}
+
+fn common_grid(before_path: &str, after_path: &str) -> Result<CommonGrid, String> {
+    let before =
+        GeoTiffFile::open(before_path).map_err(|error| format!("Erro no B04 T1: {error}"))?;
+    let after =
+        GeoTiffFile::open(after_path).map_err(|error| format!("Erro no B04 T2: {error}"))?;
+    if before.epsg() != after.epsg() {
+        return Err("EPSG T1/T2 diferente; reprojecao automatica nao e realizada".into());
+    }
+    let a = before.transform().ok_or("B04 T1 sem georreferenciamento")?;
+    let b = after.transform().ok_or("B04 T2 sem georreferenciamento")?;
+    for (left, right) in [
+        (a.pixel_width, b.pixel_width),
+        (a.pixel_height, b.pixel_height),
+        (a.skew_x, b.skew_x),
+        (a.skew_y, b.skew_y),
+    ] {
+        if !same_float(left, right) {
+            return Err(
+                "T1/T2 tem resolucao ou rotacao diferente; reprojecao nao e realizada".into(),
+            );
+        }
+    }
+    let determinant = a.pixel_width * a.pixel_height - a.skew_x * a.skew_y;
+    if determinant.abs() < 1e-12 {
+        return Err("Transformacao geografica singular".into());
+    }
+    let delta_x = b.origin_x - a.origin_x;
+    let delta_y = b.origin_y - a.origin_y;
+    let b_col_in_a = (delta_x * a.pixel_height - a.skew_x * delta_y) / determinant;
+    let b_row_in_a = (a.pixel_width * delta_y - delta_x * a.skew_y) / determinant;
+    let b_col_rounded = b_col_in_a.round();
+    let b_row_rounded = b_row_in_a.round();
+    if !same_float(b_col_in_a, b_col_rounded) || !same_float(b_row_in_a, b_row_rounded) {
+        return Err("Origens T1/T2 nao estao alinhadas a grade de pixels".into());
+    }
+    let b_col = b_col_rounded as i64;
+    let b_row = b_row_rounded as i64;
+    let left = 0i64.max(b_col);
+    let top = 0i64.max(b_row);
+    let right = (before.width() as i64).min(b_col + after.width() as i64);
+    let bottom = (before.height() as i64).min(b_row + after.height() as i64);
+    if right <= left || bottom <= top {
+        return Err("As duas cenas nao possuem extensao espacial comum".into());
+    }
+    let t1_col = left as usize;
+    let t1_row = top as usize;
+    let t2_col = (left - b_col) as usize;
+    let t2_row = (top - b_row) as usize;
+    if [t1_col, t1_row, t2_col, t2_row]
+        .iter()
+        .any(|offset| offset % 2 != 0)
+    {
+        return Err("Intersecao T1/T2 nao esta alinhada a grade SCL de 20 m".into());
+    }
+    Ok(CommonGrid {
+        width: (right - left) as usize,
+        height: (bottom - top) as usize,
+        t1_row,
+        t1_col,
+        t2_row,
+        t2_col,
+        pixel_area_m2: determinant.abs(),
+    })
 }
 
 fn gray_png(data: &[u8], size: usize, path: &str) {
@@ -846,37 +1078,46 @@ fn export_scene(prefix: &str, scene: &SceneMasks) {
 // Calcula as areas de cada componente uma unica vez, agrupando as arestas
 // por identificador do Flood Fill (sem varrer o raster para cada mancha).
 fn component_areas_fast(labels: &[u32], count: u32, size: usize) -> Vec<ComponentArea> {
-    assert_eq!(labels.len(), size * size);
+    component_areas_fast_rect(labels, count, size, size)
+}
+
+fn component_areas_fast_rect(
+    labels: &[u32],
+    count: u32,
+    width: usize,
+    height: usize,
+) -> Vec<ComponentArea> {
+    assert_eq!(labels.len(), width * height);
     let mut groups: Vec<Vec<Edge>> = vec![Vec::new(); count as usize];
     let mut pixels = vec![0usize; count as usize];
-    for r in 0..size {
-        for c in 0..size {
-            let id = labels[r * size + c];
+    for r in 0..height {
+        for c in 0..width {
+            let id = labels[r * width + c];
             if id == 0 {
                 continue;
             }
             let idx = (id - 1) as usize;
             pixels[idx] += 1;
             let edges = &mut groups[idx];
-            if r == 0 || labels[(r - 1) * size + c] != id {
+            if r == 0 || labels[(r - 1) * width + c] != id {
                 edges.push(Edge {
                     start: Point { x: c, y: r },
                     end: Point { x: c + 1, y: r },
                 });
             }
-            if r + 1 == size || labels[(r + 1) * size + c] != id {
+            if r + 1 == height || labels[(r + 1) * width + c] != id {
                 edges.push(Edge {
                     start: Point { x: c + 1, y: r + 1 },
                     end: Point { x: c, y: r + 1 },
                 });
             }
-            if c == 0 || labels[r * size + c - 1] != id {
+            if c == 0 || labels[r * width + c - 1] != id {
                 edges.push(Edge {
                     start: Point { x: c, y: r + 1 },
                     end: Point { x: c, y: r },
                 });
             }
-            if c + 1 == size || labels[r * size + c + 1] != id {
+            if c + 1 == width || labels[r * width + c + 1] != id {
                 edges.push(Edge {
                     start: Point { x: c + 1, y: r },
                     end: Point { x: c + 1, y: r + 1 },
@@ -917,6 +1158,183 @@ fn format_ha_pt(value: f64) -> String {
     format!("{value:.3}").replace('.', ",")
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_full_scene(
+    t1_b04: &str,
+    t1_b08: &str,
+    t1_scl: &str,
+    t2_b04: &str,
+    t2_b08: &str,
+    t2_scl: &str,
+    threshold: i32,
+    offset_t1_red: i32,
+    offset_t1_nir: i32,
+    offset_t2_red: i32,
+    offset_t2_nir: i32,
+    validate_only: bool,
+) -> Result<(), String> {
+    let crs_t1 = check_scene_geo(t1_b04, t1_b08, t1_scl, 0, 0, 0)?;
+    let crs_t2 = check_scene_geo(t2_b04, t2_b08, t2_scl, 0, 0, 0)?;
+    if crs_t1 != crs_t2 {
+        return Err("CRS UTM T1/T2 diferente".into());
+    }
+    let grid = common_grid(t1_b04, t2_b04)?;
+    let pixel_count = grid
+        .width
+        .checked_mul(grid.height)
+        .ok_or("Dimensoes da intersecao excedem o limite da plataforma")?;
+    println!(
+        "VALIDACAO GLOBAL OK: EPSG {}, {} x {} pixels comuns, area do pixel {:.4} m2",
+        crs_t1.epsg, grid.width, grid.height, grid.pixel_area_m2
+    );
+    println!(
+        "Memoria minima estimada: estados {:.1} MiB; rotulos {:.1} MiB; fila e contornos adicionais variam com a mascara",
+        pixel_count as f64 / 1_048_576.0,
+        pixel_count as f64 * 4.0 / 1_048_576.0
+    );
+    if validate_only {
+        return Ok(());
+    }
+
+    let _ = fs::remove_dir_all(GLOBAL_OUT);
+    fs::create_dir_all(GLOBAL_OUT)
+        .map_err(|error| format!("Nao foi possivel criar saida: {error}"))?;
+    let mut states = vec![STATE_INVALID; pixel_count];
+    let all_blocks = blocks(grid.width, grid.height, SIZE);
+    let readers_t1 = SceneReaders::open(t1_b04, t1_b08, t1_scl)?;
+    let readers_t2 = SceneReaders::open(t2_b04, t2_b08, t2_scl)?;
+    for (number, block) in all_blocks.iter().copied().enumerate() {
+        let before = process_scene_block(
+            &readers_t1,
+            grid.t1_row + block.row,
+            grid.t1_col + block.col,
+            block.width,
+            block.height,
+            threshold,
+            offset_t1_red,
+            offset_t1_nir,
+        )?;
+        let after = process_scene_block(
+            &readers_t2,
+            grid.t2_row + block.row,
+            grid.t2_col + block.col,
+            block.width,
+            block.height,
+            threshold,
+            offset_t2_red,
+            offset_t2_nir,
+        )?;
+        let local = compare_block(&before, &after);
+        copy_block_to_global(&mut states, grid.width, block, &local);
+        if number + 1 == all_blocks.len() || block.col + block.width == grid.width {
+            println!("Progresso: {}/{} blocos", number + 1, all_blocks.len());
+        }
+    }
+
+    let mut valid_both = 0usize;
+    let mut stable_vegetation = 0usize;
+    let mut stable_nonvegetation = 0usize;
+    let mut loss_pixels = 0usize;
+    let mut gain_pixels = 0usize;
+    for state in &mut states {
+        match *state {
+            STATE_STABLE_VEGETATION => {
+                valid_both += 1;
+                stable_vegetation += 1;
+                *state = 0;
+            }
+            STATE_LOSS => {
+                valid_both += 1;
+                loss_pixels += 1;
+                *state = 1;
+            }
+            STATE_GAIN => {
+                valid_both += 1;
+                gain_pixels += 1;
+                *state = 0;
+            }
+            STATE_STABLE_NONVEGETATION => {
+                valid_both += 1;
+                stable_nonvegetation += 1;
+                *state = 0;
+            }
+            _ => *state = 0,
+        }
+    }
+    assert!(loss_pixels + gain_pixels <= valid_both);
+    let (labels, component_count) = process_flood_fill_rect(&states, grid.width, grid.height);
+    let edges = process_edge_rect(&states, grid.width, grid.height);
+    let contours = connect_all_edges(&edges);
+    let area_pixels = calculate_total_area(&contours);
+    assert_eq!(
+        area_pixels, loss_pixels as f64,
+        "Area global por determinantes diferente da contagem"
+    );
+    show_geographic_coordinates(
+        t1_b04,
+        grid.width,
+        grid.height,
+        grid.t1_row,
+        grid.t1_col,
+        &contours,
+    );
+    drop(contours);
+    drop(edges);
+    let component_areas =
+        component_areas_fast_rect(&labels, component_count, grid.width, grid.height);
+    let component_sum: f64 = component_areas.iter().map(|area| area.area_pixels).sum();
+    assert_eq!(
+        component_sum, area_pixels,
+        "Soma das componentes diferente da area global"
+    );
+
+    let mut csv = String::from("mancha,pixels,contornos,area_por_determinantes_m2,area_ha\n");
+    for area in &component_areas {
+        writeln!(
+            &mut csv,
+            "{},{},{},{:.4},{:.6}",
+            area.label,
+            area.pixels,
+            area.contours,
+            area.area_pixels * grid.pixel_area_m2,
+            area.area_pixels * grid.pixel_area_m2 / 10_000.0
+        )
+        .unwrap();
+    }
+    fs::write(format!("{GLOBAL_OUT}/manchas_perda.csv"), csv).map_err(|error| error.to_string())?;
+    let mut metrics = String::from("metrica,valor\n");
+    for (key, value) in [
+        ("largura_area_comum", grid.width),
+        ("altura_area_comum", grid.height),
+        ("blocos_processados", all_blocks.len()),
+        ("pixels_validos_duas_datas", valid_both),
+        ("vegetacao_estavel", stable_vegetation),
+        ("nao_vegetacao_estavel", stable_nonvegetation),
+        ("possivel_perda_pixels", loss_pixels),
+        ("possivel_ganho_pixels", gain_pixels),
+        ("numero_manchas_perda", component_count as usize),
+    ] {
+        writeln!(&mut metrics, "{key},{value}").unwrap();
+    }
+    fs::write(format!("{GLOBAL_OUT}/metricas.csv"), metrics).map_err(|error| error.to_string())?;
+    println!("\n=== COMPARACAO TEMPORAL GLOBAL ===");
+    println!("Pixels validos nas duas datas: {valid_both}");
+    println!(
+        "Possivel perda: {loss_pixels} pixels ({:.3} ha)",
+        loss_pixels as f64 * grid.pixel_area_m2 / 10_000.0
+    );
+    println!(
+        "Possivel ganho: {gain_pixels} pixels ({:.3} ha)",
+        gain_pixels as f64 * grid.pixel_area_m2 / 10_000.0
+    );
+    println!("Componentes globais de perda: {component_count}");
+    println!(
+        "Area por determinantes: {:.3} ha",
+        area_pixels * grid.pixel_area_m2 / 10_000.0
+    );
+    Ok(())
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("ERRO DE VALIDACAO: {error}");
@@ -926,9 +1344,20 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let validate_only = args.first().is_some_and(|value| value == "--validate-only");
-    if validate_only {
-        args.remove(0);
+    let mut validate_only = false;
+    let mut full_scene = false;
+    loop {
+        match args.first().map(String::as_str) {
+            Some("--validate-only") => {
+                validate_only = true;
+                args.remove(0);
+            }
+            Some("--full") => {
+                full_scene = true;
+                args.remove(0);
+            }
+            _ => break,
+        }
     }
     // Caminhos por argumentos opcionais, mantendo a execucao direta como antes.
     let t1_b04 = args.get(0).map(String::as_str).unwrap_or(T1_B04);
@@ -980,6 +1409,22 @@ fn run() -> Result<(), String> {
             return Err(format!("Arquivo ausente: {p}"));
         }
     }
+    if full_scene {
+        return run_full_scene(
+            t1_b04,
+            t1_b08,
+            t1_scl,
+            t2_b04,
+            t2_b08,
+            t2_scl,
+            ndvi_threshold,
+            offset_t1_red,
+            offset_t1_nir,
+            offset_t2_red,
+            offset_t2_nir,
+            validate_only,
+        );
+    }
     let crs_t1 = check_scene_geo(t1_b04, t1_b08, t1_scl, row_offset, col_offset, SIZE)?;
     let crs_t2 = check_scene_geo(t2_b04, t2_b08, t2_scl, row_offset, col_offset, SIZE)?;
     let pixel_area_m2 = check_temporal_grid(t1_b04, t2_b04)?;
@@ -1022,9 +1467,14 @@ fn run() -> Result<(), String> {
         offset_t2_red,
         offset_t2_nir,
     );
+    let comp = compare_scenes(&scene1, &scene2);
+    if comp.valid_both == 0 {
+        return Err(format!(
+            "O recorte linha {row_offset}, coluna {col_offset}, {SIZE}x{SIZE} nao possui pixels validos nas duas datas; escolha outro recorte"
+        ));
+    }
     export_scene("t1", &scene1);
     export_scene("t2", &scene2);
-    let comp = compare_scenes(&scene1, &scene2);
     assert!(
         comp.loss_pixels + comp.gain_pixels <= comp.valid_both,
         "Perdas e ganhos excedem pixels validos em ambas as datas"
@@ -1089,7 +1539,7 @@ fn run() -> Result<(), String> {
     println!(
         "ATENCAO: mudanca NDVI nao confirma desmatamento. Verifique offset radiometrico e dados de referencia."
     );
-    show_geographic_coordinates(t1_b04, SIZE, row_offset, col_offset, &contours);
+    show_geographic_coordinates(t1_b04, SIZE, SIZE, row_offset, col_offset, &contours);
 
     let mut csv = String::from("mancha,pixels,contornos,area_por_determinantes_m2,area_ha\n");
     for a in &component_areas {
@@ -1465,5 +1915,149 @@ mod tests {
             areas.iter().map(|a| a.area_pixels).collect::<Vec<_>>(),
             vec![1.0, 1.0]
         );
+    }
+
+    fn rebuild_by_blocks(mask: &[u8], width: usize, height: usize, block_size: usize) -> Vec<u8> {
+        let mut rebuilt = vec![0u8; width * height];
+        for block in blocks(width, height, block_size) {
+            let mut local = vec![0u8; block.width * block.height];
+            for row in 0..block.height {
+                for col in 0..block.width {
+                    local[row * block.width + col] =
+                        mask[(block.row + row) * width + block.col + col];
+                }
+            }
+            copy_block_to_global(&mut rebuilt, width, block, &local);
+        }
+        rebuilt
+    }
+
+    fn assert_global_geometry(mask: &[u8], width: usize, height: usize, components: u32) {
+        let (labels, count) = process_flood_fill_rect(mask, width, height);
+        assert_eq!(count, components);
+        let contours = connect_all_edges(&process_edge_rect(mask, width, height));
+        let pixels = mask.iter().filter(|&&value| value == 1).count();
+        assert_eq!(calculate_total_area(&contours), pixels as f64);
+        let areas = component_areas_fast_rect(&labels, count, width, height);
+        assert_eq!(
+            areas.iter().map(|area| area.area_pixels).sum::<f64>(),
+            pixels as f64
+        );
+    }
+
+    #[test]
+    fn test_blocks_cover_small_image_once() {
+        let width = 73;
+        let height = 41;
+        let all = blocks(width, height, 512);
+        assert_eq!(
+            all,
+            vec![Block {
+                row: 0,
+                col: 0,
+                width,
+                height
+            }]
+        );
+    }
+
+    #[test]
+    fn test_blocks_cover_non_multiple_dimensions_without_overlap() {
+        let width = 1031;
+        let height = 777;
+        let mut visits = vec![0u8; width * height];
+        for block in blocks(width, height, 512) {
+            for row in 0..block.height {
+                for col in 0..block.width {
+                    visits[(block.row + row) * width + block.col + col] += 1;
+                }
+            }
+        }
+        assert!(visits.iter().all(|&count| count == 1));
+    }
+
+    #[test]
+    fn test_spot_crosses_two_and_four_windows() {
+        let width = 130;
+        let height = 130;
+        let mut two = vec![0u8; width * height];
+        for row in 20..30 {
+            for col in 60..70 {
+                two[row * width + col] = 1;
+            }
+        }
+        let two = rebuild_by_blocks(&two, width, height, 64);
+        assert_global_geometry(&two, width, height, 1);
+
+        let mut four = vec![0u8; width * height];
+        for row in 60..70 {
+            for col in 60..70 {
+                four[row * width + col] = 1;
+            }
+        }
+        let four = rebuild_by_blocks(&four, width, height, 64);
+        assert_global_geometry(&four, width, height, 1);
+    }
+
+    #[test]
+    fn test_diagonal_and_hole_across_windows() {
+        let width = 130;
+        let height = 130;
+        let mut diagonal = vec![0u8; width * height];
+        diagonal[63 * width + 63] = 1;
+        diagonal[64 * width + 64] = 1;
+        let diagonal = rebuild_by_blocks(&diagonal, width, height, 64);
+        assert_global_geometry(&diagonal, width, height, 2);
+
+        let mut hole = vec![0u8; width * height];
+        for row in 50..80 {
+            for col in 50..80 {
+                hole[row * width + col] = 1;
+            }
+        }
+        for row in 60..70 {
+            for col in 60..70 {
+                hole[row * width + col] = 0;
+            }
+        }
+        let hole = rebuild_by_blocks(&hole, width, height, 64);
+        assert_global_geometry(&hole, width, height, 1);
+        let contours = connect_all_edges(&process_edge_rect(&hole, width, height));
+        assert_eq!(contours.len(), 2);
+    }
+
+    #[test]
+    fn test_global_result_is_independent_of_block_size() {
+        let width = 525;
+        let height = 519;
+        let mut mask = vec![0u8; width * height];
+        for row in 50..470 {
+            for col in 40..490 {
+                mask[row * width + col] = 1;
+            }
+        }
+        for row in 200..260 {
+            for col in 200..300 {
+                mask[row * width + col] = 0;
+            }
+        }
+        let expected_pixels = mask.iter().filter(|&&value| value == 1).count();
+        for block_size in [64, 128, 256, 512] {
+            let rebuilt = rebuild_by_blocks(&mask, width, height, block_size);
+            assert_eq!(rebuilt, mask);
+            let contours = connect_all_edges(&process_edge_rect(&rebuilt, width, height));
+            assert_eq!(calculate_total_area(&contours), expected_pixels as f64);
+        }
+    }
+
+    #[test]
+    fn test_identical_block_has_no_loss_or_gain() {
+        let scene = BlockMasks {
+            valid: vec![1, 1, 0, 1],
+            vegetation: vec![1, 0, 1, 1],
+        };
+        let states = compare_block(&scene, &scene);
+        assert!(!states.contains(&STATE_LOSS));
+        assert!(!states.contains(&STATE_GAIN));
     }
 }
