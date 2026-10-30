@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Análise Temporal | Sentinel-2 — Rust</title>
+<style>
+:root{color-scheme:dark;--bg:#0e141b;--panel:#17212c;--panel2:#1d2b37;--bd:#344352;--tx:#f0f4f8;--sub:#b6c6d5;--accent:#65d5ae;--loss:#f0646c;--gain:#63a5ed}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.48 system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+header{padding:25px 22px 19px;border-bottom:1px solid var(--bd);background:#13202b}.wrap{max-width:1280px;margin:0 auto}
+.headerrow{display:flex;align-items:start;justify-content:space-between;gap:14px;flex-wrap:wrap}
+h1{font-size:23px;font-weight:710;line-height:1.24;margin:0 0 7px}h2{font-size:17px;font-weight:650;margin:0 0 15px}h3{margin:0 0 9px;font-size:14px}
+p{margin:6px 0;color:var(--sub)}code{background:#111b25;padding:2px 6px;border-radius:5px;color:#d1eae6}
+.pill{background:#18362f;color:#8ae5be;padding:7px 12px;border:1px solid #356b56;border-radius:22px;font-size:12px;font-weight:650}
+main{padding:22px 22px 45px}.metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:11px;margin-bottom:20px}.metric{background:var(--panel);border:1px solid var(--bd);border-radius:11px;padding:15px}
+.metric span{display:block;font-size:12px;color:var(--sub)}.metric b{display:block;font-size:23px;font-variant-numeric:tabular-nums;margin-top:3px}.loss b{color:#fb8f96}.gain b{color:#98bef6}
+.card{border-radius:12px;border:1px solid var(--bd);background:var(--panel);padding:17px;margin-bottom:18px}
+.tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:17px}button,a.dl{appearance:none;border:1px solid var(--bd);background:var(--panel2);color:var(--tx);border-radius:8px;font-size:13px;font-weight:600;padding:9px 13px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;min-height:37px}button:hover,a.dl:hover{border-color:#7c9baf}button.active{background:#20493d;border-color:#4d9f83;color:#b8f4d9}button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.images{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.imageframe{background:#0c1015;border:1px solid var(--bd);border-radius:8px;overflow:hidden}.imageframe img{width:100%;height:auto;display:block;image-rendering:pixelated;aspect-ratio:1;object-fit:contain}
+.scene-title{display:flex;justify-content:space-between;gap:8px;align-items:center;margin:3px 0 9px}.scene-title strong{font-size:15px}.caption{font-size:12px;color:var(--sub);margin-top:9px;word-break:break-word}
+.viewer{max-width:640px;margin:0 auto}.overlay{position:relative;aspect-ratio:1;overflow:hidden;border-radius:8px;border:1px solid var(--bd);background:#10181f;cursor:crosshair}
+.overlay img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;image-rendering:pixelated;pointer-events:none}.overlay img.after{clip-path:inset(0 50% 0 0)}.overlay .divider{position:absolute;top:0;bottom:0;width:2px;left:50%;background:#f5f6f7;box-shadow:0 0 6px #000;pointer-events:none}
+.range-row{display:flex;gap:12px;align-items:center;margin-top:14px}.range-row input{flex:1;accent-color:var(--accent)}.range-row span{min-width:55px;color:var(--sub);font-variant-numeric:tabular-nums}
+.legend{display:flex;gap:15px;flex-wrap:wrap;margin-top:14px;color:var(--sub);font-size:12px}.leg{display:flex;align-items:center;gap:6px}.swatch{width:13px;height:13px;border-radius:3px;display:inline-block}
+.gallery{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.smallimg{width:100%;aspect-ratio:1;background:#0d141c;object-fit:contain;image-rendering:pixelated;border-radius:8px;border:1px solid var(--bd)}.gallery article h3{margin-bottom:9px}.gallery article a{margin-top:7px}
+.info{border-left:3px solid #ddb769;background:#342e22;padding:10px 13px;color:#f2e7cd;border-radius:2px 8px 8px 2px}.info p{color:inherit}.grid2{display:grid;grid-template-columns:1.1fr 1fr;gap:18px}.files{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.meta{margin:0;padding-left:18px;color:var(--sub)}.meta li{margin:7px 0}
+footer{padding:17px 22px;color:#9aabba;font-size:12px;text-align:center;border-top:1px solid var(--bd)}
+@media(max-width:860px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.gallery{grid-template-columns:repeat(2,minmax(0,1fr))}.grid2{grid-template-columns:1fr}}
+@media(max-width:580px){main{padding:14px 12px 35px}header{padding:16px 12px}.images{grid-template-columns:1fr}.metrics{gap:8px}.metric{padding:12px}.metric b{font-size:19px}.gallery{grid-template-columns:1fr}.card{padding:12px}}
+</style>
+</head>
+<body>
+<header><div class="wrap headerrow"><div><h1>Monitoramento Sentinel-2</h1><p>Painel local de análise temporal · Processamento matemático em Rust · Recorte de 512 × 512 pixels</p></div><span class="pill">Análise exploratória — não é laudo de desmatamento</span></div></header>
+<main class="wrap"><p><a class="dl" href="/">← Voltar à configuração</a></p>
+<section class="metrics" aria-label="Resumo de métricas">
+<div class="metric loss"><span>Possível perda de vegetação</span><b>{{LOSS_HA}} ha</b></div>
+<div class="metric gain"><span>Possível ganho de vegetação</span><b>{{GAIN_HA}} ha</b></div>
+<div class="metric"><span>Manchas de possível perda</span><b>{{LOSS_COMPONENTS}}</b></div>
+<div class="metric"><span>Pixels válidos em ambas as datas</span><b>{{VALID_BOTH}}</b></div>
+<div class="metric"><span>Limiar NDVI aplicado</span><b>{{NDVI_THRESHOLD}}</b></div>
+</section>
+<section class="card"><h2>1. Etapas do processamento nas duas datas</h2>
+<div class="tabs" role="group" aria-label="Etapas de processamento">
+<button type="button" data-stage="b04">B04 — Vermelho</button>
+<button type="button" data-stage="b08">B08 — Infravermelho</button>
+<button type="button" data-stage="ndvi" class="active">NDVI</button>
+<button type="button" data-stage="valid">SCL / Máscara válida</button>
+<button type="button" data-stage="vegetation">Vegetação</button>
+</div>
+<div class="images">
+<div><div class="scene-title"><strong>Data inicial — T1</strong><a id="downloadT1" class="dl" href="t1_ndvi.png" download>Baixar PNG</a></div><div class="imageframe"><img id="sceneT1" src="t1_ndvi.png" alt="NDVI da data inicial"></div><div class="caption">Fonte B04: {{T1_PATH}}</div></div>
+<div><div class="scene-title"><strong>Data final — T2</strong><a id="downloadT2" class="dl" href="t2_ndvi.png" download>Baixar PNG</a></div><div class="imageframe"><img id="sceneT2" src="t2_ndvi.png" alt="NDVI da data final"></div><div class="caption">Fonte B04: {{T2_PATH}}</div></div>
+</div><p style="font-size:12px;margin-top:14px">B04 e B08 são pré-visualizações em tons de cinza. NDVI utiliza uma paleta de cores ilustrativa; cinza indica pixel inválido. RGB verdadeiro exigiria B02 e B03.</p>
+</section>
+<section class="card grid2"><div><h2>2. Comparador com divisor móvel</h2><div class="viewer"><div class="overlay" id="overlay" aria-label="Comparação visual alinhada de T1 e T2">
+<img id="overlayT1" src="t1_ndvi.png" alt="Cena T1"><img class="after" id="overlayT2" src="t2_ndvi.png" alt="Cena T2"><div class="divider" id="divider"></div>
+</div><div class="range-row"><label for="split">T1</label><input id="split" type="range" min="0" max="100" value="50" aria-label="Posição do divisor das datas"><label for="split">T2</label><span id="splitValue">50%</span></div><p id="pixelPosition" style="font-size:12px">Passe o cursor sobre a imagem para ver o pixel.</p></div></div>
+<div><h2>3. Mapa de mudanças</h2><div class="imageframe"><img src="mudancas.png" alt="Mapa de classes de mudanças observadas entre datas"></div>
+<div class="legend">
+<span class="leg"><i class="swatch" style="background:#268f5b"></i>Vegetação estável</span>
+<span class="leg"><i class="swatch" style="background:#ea4647"></i>Possível perda</span>
+<span class="leg"><i class="swatch" style="background:#3f9ae8"></i>Possível ganho</span>
+<span class="leg"><i class="swatch" style="background:#ab9467"></i>Não vegetado estável</span>
+<span class="leg"><i class="swatch" style="background:#545b67"></i>Inválido</span>
+</div><div class="files"><a class="dl" href="mudancas.png" download>Baixar mapa de mudanças</a></div>
+</div></section>
+<section class="card"><h2>4. Figuras e resultados para análise</h2><div class="gallery">
+<article><h3>Possível perda (binária)</h3><img class="smallimg" src="perda.png" alt="Máscara binária de possível perda de cobertura vegetal"><a class="dl" href="perda.png" download>Baixar PNG</a></article>
+<article><h3>Possível ganho (binária)</h3><img class="smallimg" src="ganho.png" alt="Máscara binária de possível ganho de cobertura vegetal"><a class="dl" href="ganho.png" download>Baixar PNG</a></article>
+<article><h3>Contornos extraídos</h3><img class="smallimg" src="perda_contornos.png" alt="Contornos geométricos de possível perda, calculados em Rust"><a class="dl" href="perda_contornos.png" download>Baixar PNG</a></article>
+<article><h3>Possível perda sobre B04 (T2)</h3><img class="smallimg" src="perda_sobre_b04.png" alt="Possível perda em vermelho sobre banda B04 na segunda data"><a class="dl" href="perda_sobre_b04.png" download>Baixar PNG</a></article>
+<article><h3>Vegetação da data inicial</h3><img class="smallimg" src="t1_vegetation.png" alt="Máscara de vegetação da primeira data"><a class="dl" href="t1_vegetation.png" download>Baixar PNG</a></article>
+<article><h3>Vegetação da data final</h3><img class="smallimg" src="t2_vegetation.png" alt="Máscara de vegetação da segunda data"><a class="dl" href="t2_vegetation.png" download>Baixar PNG</a></article>
+</div><div class="files"><a class="dl" href="manchas_perda.csv" download>Exportar manchas (CSV)</a><a class="dl" href="metricas.csv" download>Exportar métricas (CSV)</a></div></section>
+<section class="card grid2"><div><h2>5. Conferência científica antes de publicar</h2><div class="info"><p>Esta ferramenta identifica transições de classificação NDVI em pixels válidos nas duas datas. O resultado deve ser descrito como possível alteração da cobertura vegetal, NÃO como desmatamento confirmado.</p></div></div>
+<div><h2>Checklist de entrada</h2><ol class="meta"><li>Confirmar a data e o identificador do produto Sentinel-2 de cada cena.</li><li>Confirmar <code>BOA_ADD_OFFSET</code> no XML original e se o TIFF foi harmonizado.</li><li>Verificar a comparabilidade sazonal e nuvens/sombras.</li><li>Conferir visualmente manchas e, para o artigo, usar evidências independentes quando possível.</li></ol><p>T1 vegetal: {{AREA_T1}} ha; T2 vegetal: {{AREA_T2}} ha. Estes totais têm domínios de validade possivelmente diferentes, portanto não devem ser simplesmente subtraídos para estimar a mudança.</p></div></section>
+</main><footer>Ferramenta local de apoio ao trabalho acadêmico · Rust calcula; este painel apenas apresenta imagens e dados exportados.</footer>
+<script>
+(()=>{
+  const stages={b04:'B04 (vermelho)',b08:'B08 (infravermelho próximo)',ndvi:'NDVI',valid:'máscara de pixels válidos',vegetation:'máscara de vegetação'};
+  let selected='ndvi';
+  const el=id=>document.getElementById(id);
+  function setStage(value){
+    if(!stages[value])return;
+    selected=value;
+    for(const key of ['T1','T2']){
+      const prefix=key.toLowerCase();const file=`${prefix}_${value}.png`;
+      el(`scene${key}`).src=file;el(`scene${key}`).alt=`${stages[value]} na data ${key}`;
+      el(`overlay${key}`).src=file;el(`download${key}`).href=file;
+    }
+    document.querySelectorAll('[data-stage]').forEach(button=>{
+      button.classList.toggle('active',button.dataset.stage===value);
+      button.setAttribute('aria-pressed',String(button.dataset.stage===value));
+    });
+  }
+  function setDivider(v){
+    el('overlayT2').style.clipPath=`inset(0 ${100-v}% 0 0)`;
+    el('divider').style.left=`${v}%`;
+    el('splitValue').textContent=`${v}%`;
+  }
+  document.querySelectorAll('[data-stage]').forEach(button=>button.addEventListener('click',()=>setStage(button.dataset.stage)));
+  el('split').addEventListener('input',event=>setDivider(Number(event.target.value)));
+  el('overlay').addEventListener('mousemove',event=>{
+    const r=el('overlay').getBoundingClientRect();
+    const x=Math.min(511,Math.max(0,Math.floor((event.clientX-r.left)/r.width*512)));
+    const y=Math.min(511,Math.max(0,Math.floor((event.clientY-r.top)/r.height*512)));
+    el('pixelPosition').textContent=`Pixel local: coluna ${x}, linha ${y} · Pixel no TIFF original: coluna ${x+Number("{{COL_OFFSET}}")}, linha ${y+Number("{{ROW_OFFSET}}")}`;
+  });
+  setStage('ndvi');setDivider(50);
+})();
+</script>
+</body></html>
