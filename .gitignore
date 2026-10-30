@@ -28,3 +28,6 @@ target
 # Local inputs and generated temporal-analysis artifacts
 /web_uploads/
 /resultado_temporal/
+
+# Local Sentinel-2 inputs and generated images
+/data/
