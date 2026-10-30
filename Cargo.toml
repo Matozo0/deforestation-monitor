@@ -1,0 +1,10 @@
+[package]
+name = "deforestation-monitor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+geotiff-reader = "0.9.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+ndarray = "0.17.2"
+tiff-reader = "0.8.1"
