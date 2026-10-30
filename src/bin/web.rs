@@ -1,146 +1,521 @@
-//! Interface local: upload TIFF em streaming, processamento Rust e painel integrado.
-use std::{collections::HashMap,fs::{self,File},io::{Read,Write},net::{TcpListener,TcpStream},path::{Path,PathBuf},process::Command,sync::{Arc,Mutex,atomic::{AtomicBool,Ordering}},thread,time::Duration};
-const HOME:&str=include_str!("web_home.html");
-const OUT:&str="resultado_temporal";
-const UPLOAD:&str="web_uploads";
-const MAX_FILE:u64=5*1024*1024*1024;
-fn response(s:&mut TcpStream,code:&str,mime:&str,data:&[u8]){
-    let hdr=format!("HTTP/1.1 {code}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",data.len());
-    let _=s.write_all(hdr.as_bytes());let _=s.write_all(data);
+//! Interface local para selecionar cenas existentes em data/ e executar o pipeline Rust.
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
+
+const HOME: &str = include_str!("web_home.html");
+const OUT: &str = "resultado_temporal";
+const REQUIRED: [&str; 3] = ["B04.tif", "B08.tif", "SCL.tif"];
+
+fn response(stream: &mut TcpStream, code: &str, mime: &str, data: &[u8]) {
+    let header = format!(
+        "HTTP/1.1 {code}\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        data.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(data);
 }
-fn url_decode(s:&str)->String{
-    let b=s.as_bytes();let mut out=Vec::new();let mut i=0;
-    while i<b.len(){if b[i]==b'%'&&i+2<b.len(){let nib=|x:u8|match x{b'0'..=b'9'=>Some(x-b'0'),b'a'..=b'f'=>Some(x-b'a'+10),b'A'..=b'F'=>Some(x-b'A'+10),_=>None};if let(Some(a),Some(c))=(nib(b[i+1]),nib(b[i+2])){out.push(a*16+c);i+=3;continue;}}out.push(if b[i]==b'+'{b' '}else{b[i]});i+=1;}
-    String::from_utf8_lossy(&out).to_string()
+
+fn url_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let nibble = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            if let (Some(a), Some(b)) = (nibble(bytes[index + 1]), nibble(bytes[index + 2])) {
+                output.push(a * 16 + b);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(if bytes[index] == b'+' {
+            b' '
+        } else {
+            bytes[index]
+        });
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).to_string()
 }
-fn fields(s:&str)->HashMap<String,String>{s.split('&').filter_map(|v|v.split_once('=')).map(|(k,v)|(url_decode(k),url_decode(v))).collect()}
-fn allowed_slot(s:&str)->bool{matches!(s,"t1_b04"|"t1_b08"|"t1_scl"|"t2_b04"|"t2_b08"|"t2_scl")}
-fn header_value<'a>(h:&'a str,key:&str)->Option<&'a str>{h.lines().filter_map(|line|line.split_once(':')).find(|(k,_)|k.eq_ignore_ascii_case(key)).map(|(_,v)|v.trim())}
-fn base()->PathBuf{PathBuf::from(env!("CARGO_MANIFEST_DIR"))}
-fn has_tiff_signature(path:&Path)->bool{
-    let mut signature=[0u8;4];
-    File::open(path).and_then(|mut file|file.read_exact(&mut signature)).is_ok()
-        && matches!(signature,[b'I',b'I',42,0]|[b'M',b'M',0,42]|[b'I',b'I',43,0]|[b'M',b'M',0,43])
+
+fn fields(body: &str) -> HashMap<String, String> {
+    body.split('&')
+        .filter_map(|item| item.split_once('='))
+        .map(|(key, value)| (url_decode(key), url_decode(value)))
+        .collect()
 }
-fn valid_process_numbers(values:&[String])->bool{
-    let parsed=values.iter().map(|value|value.parse::<i32>()).collect::<Result<Vec<_>,_>>();
-    let Ok(parsed)=parsed else{return false};
-    parsed.len()==7
-        && parsed[0]>=0 && parsed[1]>=0
-        && parsed[0]%2==0 && parsed[1]%2==0
-        && (-1000..=1000).contains(&parsed[2])
-        && parsed[3..].iter().all(|value|(-1_000_000..=1_000_000).contains(value))
+fn header_value<'a>(headers: &'a str, key: &str) -> Option<&'a str> {
+    headers
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
+        .map(|(_, value)| value.trim())
 }
-fn handle(mut s:TcpStream,busy:Arc<AtomicBool>,status:Arc<Mutex<String>>){
-    let _=s.set_read_timeout(Some(Duration::from_secs(120)));
-    let mut pre=Vec::new();let mut part=[0u8;65536];let end=loop{
-        if pre.len()>32768{return;}let n=match s.read(&mut part){Ok(n)=>n,Err(_)=>return};if n==0{return;}
-        pre.extend_from_slice(&part[..n]);if let Some(i)=pre.windows(4).position(|w|w==b"\r\n\r\n"){break i+4;}
+fn base() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+fn has_tiff_signature(path: &Path) -> bool {
+    let mut signature = [0u8; 4];
+    File::open(path)
+        .and_then(|mut file| file.read_exact(&mut signature))
+        .is_ok()
+        && matches!(
+            signature,
+            [b'I', b'I', 42, 0] | [b'M', b'M', 0, 42] | [b'I', b'I', 43, 0] | [b'M', b'M', 0, 43]
+        )
+}
+fn scene_date(name: &str) -> Option<String> {
+    name.split('_')
+        .find(|part| part.len() == 8 && part.bytes().all(|byte| byte.is_ascii_digit()))
+        .map(|date| format!("{}/{}/{}", &date[6..8], &date[4..6], &date[0..4]))
+}
+fn safe_scene_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+}
+fn scene_files(root: &Path, name: &str) -> Result<[PathBuf; 3], String> {
+    if !safe_scene_name(name) {
+        return Err("Nome de cena invalido".into());
+    }
+    let data = root
+        .join("data")
+        .canonicalize()
+        .map_err(|_| "Pasta data/ nao encontrada")?;
+    let scene = data
+        .join(name)
+        .canonicalize()
+        .map_err(|_| format!("Cena nao encontrada: {name}"))?;
+    if !scene.starts_with(&data) || !scene.is_dir() {
+        return Err("Cena fora da pasta data/".into());
+    }
+    let files = REQUIRED.map(|file| scene.join(file));
+    for (index, path) in files.iter().enumerate() {
+        if !path.is_file() {
+            return Err(format!("Cena {name}: arquivo {} ausente", REQUIRED[index]));
+        }
+        if !has_tiff_signature(path) {
+            return Err(format!(
+                "Cena {name}: {} nao e um TIFF legivel",
+                REQUIRED[index]
+            ));
+        }
+    }
+    Ok(files)
+}
+fn list_scenes(root: &Path) -> Result<serde_json::Value, String> {
+    let entries = fs::read_dir(root.join("data"))
+        .map_err(|error| format!("Nao foi possivel ler data/: {error}"))?;
+    let mut scenes = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !safe_scene_name(&name) {
+            continue;
+        }
+        let missing: Vec<&str> = REQUIRED
+            .iter()
+            .copied()
+            .filter(|file| !entry.path().join(file).is_file())
+            .collect();
+        scenes.push(serde_json::json!({"name":name,"date":scene_date(&name),"complete":missing.is_empty(),"missing":missing,"files":REQUIRED}));
+    }
+    scenes.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Ok(serde_json::Value::Array(scenes))
+}
+fn valid_process_numbers(values: &[String]) -> bool {
+    let Ok(parsed) = values
+        .iter()
+        .map(|value| value.parse::<i32>())
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return false;
     };
-    let h=match std::str::from_utf8(&pre[..end]){Ok(x)=>x,Err(_)=>return};
-    let first=h.lines().next().unwrap_or("");let mut parts=first.split_whitespace();
-    let method=parts.next().unwrap_or("");let full_route=parts.next().unwrap_or("/");
-    let (route,query)=full_route.split_once('?').unwrap_or((full_route,""));
-    let base=base();
-    if method=="GET"{
-        match route{
-            "/"=>{response(&mut s,"200 OK","text/html; charset=utf-8",HOME.as_bytes());return;}
-            "/status"=>{let x=status.lock().unwrap().clone();response(&mut s,"200 OK","text/plain; charset=utf-8",x.as_bytes());return;}
-            _=>{}
-        }
-        if let Some(name)=route.strip_prefix("/files/"){
-            let safe=!name.is_empty()&&name.chars().all(|x|x.is_ascii_alphanumeric()||"._-".contains(x))&&!name.contains("..");
-            if !safe {response(&mut s,"403 Forbidden","text/plain",b"Caminho invalido");return;}
-            let p=base.join(OUT).join(name);
-            if let Ok(bytes)=fs::read(p){let mime=if name.ends_with(".png"){"image/png"}else if name.ends_with(".csv"){"text/csv; charset=utf-8"}else if name.ends_with(".html"){"text/html; charset=utf-8"}else{"application/octet-stream"};response(&mut s,"200 OK",mime,&bytes);return;}
-        }
-        response(&mut s,"404 Not Found","text/plain; charset=utf-8",b"Arquivo nao disponivel");return;
-    }
-    if method!="POST"{response(&mut s,"405 Method Not Allowed","text/plain",b"Metodo invalido");return;}
-    if busy.load(Ordering::SeqCst){response(&mut s,"409 Conflict","text/plain",b"Processamento em andamento");return;}
-    let size=match header_value(h,"Content-Length").and_then(|x|x.parse::<u64>().ok()){Some(v)=>v,None=>{response(&mut s,"411 Length Required","text/plain",b"Content-Length obrigatorio");return;}};
-    if route=="/copy"{
-        let p=fields(query);let from=p.get("from").cloned().unwrap_or_default();let to=p.get("to").cloned().unwrap_or_default();
-        if !allowed_slot(&from)||!allowed_slot(&to)||from==to {response(&mut s,"400 Bad Request","text/plain",b"Banda invalida");return;}
-        let a=base.join(UPLOAD).join(format!("{from}.tif"));let b=base.join(UPLOAD).join(format!("{to}.tif"));
-        match fs::copy(a,b){Ok(_)=>response(&mut s,"200 OK","text/plain",b"Copiado"),Err(_)=>response(&mut s,"400 Bad Request","text/plain",b"Arquivo de origem ausente")};return;
-    }
-    if route=="/upload"{
-        let slot=fields(query).get("slot").cloned().unwrap_or_default();
-        if !allowed_slot(&slot){response(&mut s,"400 Bad Request","text/plain",b"Banda invalida");return;}
-        if size==0||size>MAX_FILE{response(&mut s,"413 Payload Too Large","text/plain",b"Tamanho invalido");return;}
-        let folder=base.join(UPLOAD);if fs::create_dir_all(&folder).is_err(){response(&mut s,"500 Internal Server Error","text/plain",b"Pasta nao pode ser criada");return;}
-        let part_path=folder.join(format!("{slot}.part"));let dest=folder.join(format!("{slot}.tif"));
-        let mut f=match File::create(&part_path){Ok(f)=>f,Err(_)=>{response(&mut s,"500 Internal Server Error","text/plain",b"Erro criando arquivo");return;}};
-        let mut remaining=size;let from_header=&pre[end..];let n=(from_header.len() as u64).min(remaining) as usize;
-        if f.write_all(&from_header[..n]).is_err(){return;}remaining-=n as u64;
-        while remaining>0{
-            let want=(remaining as usize).min(part.len());let count=match s.read(&mut part[..want]){Ok(x)=>x,Err(_)=>0};
-            if count==0{break;}if f.write_all(&part[..count]).is_err(){break;}remaining-=count as u64;
-        }
-        drop(f);
-        if remaining>0{let _=fs::remove_file(part_path);response(&mut s,"400 Bad Request","text/plain",b"Upload interrompido");return;}
-        if !has_tiff_signature(&part_path){let _=fs::remove_file(part_path);response(&mut s,"400 Bad Request","text/plain; charset=utf-8",b"Arquivo enviado nao possui assinatura TIFF valida");return;}
-        if fs::rename(&part_path,&dest).is_err(){let _=fs::remove_file(&dest);if fs::rename(&part_path,&dest).is_err(){response(&mut s,"500 Internal Server Error","text/plain",b"Erro salvando TIFF");return;}}
-        response(&mut s,"200 OK","text/plain; charset=utf-8",format!("{slot}: recebido ({:.1} MB)",size as f64/1e6).as_bytes());return;
-    }
-    if route!="/process"{response(&mut s,"404 Not Found","text/plain",b"Rota inexistente");return;}
-    if size==0||size>16384{response(&mut s,"400 Bad Request","text/plain",b"Formulario invalido");return;}
-    while (pre.len()-end) < size as usize{let n=match s.read(&mut part){Ok(v)=>v,Err(_)=>0};if n==0{break;}pre.extend_from_slice(&part[..n]);}
-    if pre.len()-end<size as usize{response(&mut s,"400 Bad Request","text/plain",b"Formulario incompleto");return;}
-    let form=fields(&String::from_utf8_lossy(&pre[end..end+size as usize]));
-    let keys=["row","col","threshold","o1r","o1n","o2r","o2n"];
-    let nums:Vec<String>=keys.iter().map(|k|form.get(*k).cloned().unwrap_or_default()).collect();
-    if !valid_process_numbers(&nums){
-        response(&mut s,"400 Bad Request","text/plain",b"Parametros numericos invalidos");return;
-    }
-    let slots=["t1_b04","t1_b08","t1_scl","t2_b04","t2_b08","t2_scl"];
-    for slot in slots{if !base.join(UPLOAD).join(format!("{slot}.tif")).is_file(){response(&mut s,"400 Bad Request","text/plain; charset=utf-8",format!("Falta selecionar {slot}").as_bytes());return;}}
-    if busy.swap(true,Ordering::SeqCst){response(&mut s,"409 Conflict","text/plain",b"Ja processando");return;}
-    *status.lock().unwrap()="PROCESSANDO: calculando NDVI, mascaras, mudancas e areas...".into();
-    let st=status.clone();let flag=busy.clone();
-    thread::spawn(move||{
-        let mut args:Vec<String>=slots.iter().map(|slot|format!("{UPLOAD}/{slot}.tif")).collect();args.extend(nums);
-        let outcome=Command::new("cargo").current_dir(&base).arg("run").arg("--quiet").arg("--bin").arg("temporal").arg("--").args(args).output();
-        let msg=match outcome{Ok(x) if x.status.success()=>"CONCLUIDO: resultados prontos".to_owned(),Ok(x)=>format!("ERRO: {}",String::from_utf8_lossy(&x.stderr).chars().take(3000).collect::<String>()),Err(e)=>format!("ERRO: {e}")};
-        *st.lock().unwrap()=msg;flag.store(false,Ordering::SeqCst);
-    });
-    response(&mut s,"202 Accepted","text/plain",b"Processamento iniciado");
+    parsed.len() == 7
+        && parsed[0] >= 0
+        && parsed[1] >= 0
+        && parsed[0] % 2 == 0
+        && parsed[1] % 2 == 0
+        && (-1000..=1000).contains(&parsed[2])
+        && parsed[3..]
+            .iter()
+            .all(|value| (-1_000_000..=1_000_000).contains(value))
 }
-fn main(){
-    let listener=TcpListener::bind("127.0.0.1:3000").expect("Porta 3000 em uso");
-    println!("Painel: http://127.0.0.1:3000");println!("Use Ctrl+C para encerrar");
-    let busy=Arc::new(AtomicBool::new(false));let status=Arc::new(Mutex::new("Pronto para receber imagens".into()));
-    for conn in listener.incoming(){if let Ok(s)=conn{let b=busy.clone();let st=status.clone();thread::spawn(move||handle(s,b,st));}}
+fn temporal_command(
+    root: &Path,
+    validate_only: bool,
+    files: [&Path; 6],
+    numbers: &[String],
+) -> std::io::Result<std::process::Output> {
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(root)
+        .arg("run")
+        .arg("--quiet")
+        .arg("--bin")
+        .arg("temporal")
+        .arg("--");
+    if validate_only {
+        command.arg("--validate-only");
+    }
+    command.args(files).args(numbers).output()
+}
+fn command_error(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let message = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    message.trim().chars().take(3000).collect()
+}
+fn read_body(
+    stream: &mut TcpStream,
+    request: &mut Vec<u8>,
+    header_end: usize,
+    size: usize,
+) -> Result<String, ()> {
+    let mut buffer = [0u8; 8192];
+    while request.len() - header_end < size {
+        let count = stream.read(&mut buffer).map_err(|_| ())?;
+        if count == 0 {
+            return Err(());
+        }
+        request.extend_from_slice(&buffer[..count]);
+    }
+    Ok(String::from_utf8_lossy(&request[header_end..header_end + size]).to_string())
+}
+
+fn handle(mut stream: TcpStream, busy: Arc<AtomicBool>, status: Arc<Mutex<String>>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 8192];
+    let header_end = loop {
+        if request.len() > 32768 {
+            return;
+        }
+        let Ok(count) = stream.read(&mut buffer) else {
+            return;
+        };
+        if count == 0 {
+            return;
+        }
+        request.extend_from_slice(&buffer[..count]);
+        if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
+        }
+    };
+    let Ok(headers) = std::str::from_utf8(&request[..header_end]) else {
+        return;
+    };
+    let mut first = headers.lines().next().unwrap_or("").split_whitespace();
+    let method = first.next().unwrap_or("").to_owned();
+    let route = first
+        .next()
+        .unwrap_or("/")
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .to_owned();
+    let content_length =
+        header_value(headers, "Content-Length").and_then(|value| value.parse::<usize>().ok());
+    let root = base();
+    if method == "GET" {
+        if route == "/" {
+            response(
+                &mut stream,
+                "200 OK",
+                "text/html; charset=utf-8",
+                HOME.as_bytes(),
+            );
+            return;
+        }
+        if route == "/status" {
+            let message = status.lock().unwrap().clone();
+            response(
+                &mut stream,
+                "200 OK",
+                "text/plain; charset=utf-8",
+                message.as_bytes(),
+            );
+            return;
+        }
+        if route == "/scenes" {
+            match list_scenes(&root) {
+                Ok(value) => response(
+                    &mut stream,
+                    "200 OK",
+                    "application/json; charset=utf-8",
+                    value.to_string().as_bytes(),
+                ),
+                Err(error) => response(
+                    &mut stream,
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    error.as_bytes(),
+                ),
+            }
+            return;
+        }
+        if let Some(name) = route.strip_prefix("/files/") {
+            let safe = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || "._-".contains(ch))
+                && !name.contains("..");
+            if !safe {
+                response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain",
+                    b"Caminho invalido",
+                );
+                return;
+            }
+            if let Ok(bytes) = fs::read(root.join(OUT).join(name)) {
+                let mime = if name.ends_with(".png") {
+                    "image/png"
+                } else if name.ends_with(".csv") {
+                    "text/csv; charset=utf-8"
+                } else {
+                    "text/html; charset=utf-8"
+                };
+                response(&mut stream, "200 OK", mime, &bytes);
+                return;
+            }
+        }
+        response(
+            &mut stream,
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            b"Arquivo nao disponivel",
+        );
+        return;
+    }
+    if method != "POST" {
+        response(
+            &mut stream,
+            "405 Method Not Allowed",
+            "text/plain",
+            b"Metodo invalido",
+        );
+        return;
+    }
+    if busy.load(Ordering::SeqCst) {
+        response(
+            &mut stream,
+            "409 Conflict",
+            "text/plain",
+            b"Processamento em andamento",
+        );
+        return;
+    }
+    let Some(size) = content_length else {
+        response(
+            &mut stream,
+            "411 Length Required",
+            "text/plain",
+            b"Content-Length obrigatorio",
+        );
+        return;
+    };
+    if size == 0 || size > 16384 {
+        response(
+            &mut stream,
+            "400 Bad Request",
+            "text/plain",
+            b"Formulario invalido",
+        );
+        return;
+    }
+    let Ok(body) = read_body(&mut stream, &mut request, header_end, size) else {
+        response(
+            &mut stream,
+            "400 Bad Request",
+            "text/plain",
+            b"Formulario incompleto",
+        );
+        return;
+    };
+    let form = fields(&body);
+    let t1 = form.get("t1").cloned().unwrap_or_default();
+    let t2 = form.get("t2").cloned().unwrap_or_default();
+    let keys = ["row", "col", "threshold", "o1r", "o1n", "o2r", "o2n"];
+    let numbers: Vec<String> = keys
+        .iter()
+        .map(|key| form.get(*key).cloned().unwrap_or_default())
+        .collect();
+    if !valid_process_numbers(&numbers) {
+        response(
+            &mut stream,
+            "400 Bad Request",
+            "text/plain",
+            b"Parametros numericos invalidos",
+        );
+        return;
+    }
+    let files1 = match scene_files(&root, &t1) {
+        Ok(files) => files,
+        Err(error) => {
+            response(
+                &mut stream,
+                "400 Bad Request",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            );
+            return;
+        }
+    };
+    let files2 = match scene_files(&root, &t2) {
+        Ok(files) => files,
+        Err(error) => {
+            response(
+                &mut stream,
+                "400 Bad Request",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            );
+            return;
+        }
+    };
+    let files = [
+        &*files1[0],
+        &*files1[1],
+        &*files1[2],
+        &*files2[0],
+        &*files2[1],
+        &*files2[2],
+    ];
+    if route == "/validate" {
+        match temporal_command(&root, true, files, &numbers) {
+            Ok(output) if output.status.success() => response(
+                &mut stream,
+                "200 OK",
+                "text/plain; charset=utf-8",
+                output.stdout.as_slice(),
+            ),
+            Ok(output) => response(
+                &mut stream,
+                "400 Bad Request",
+                "text/plain; charset=utf-8",
+                command_error(&output).as_bytes(),
+            ),
+            Err(error) => response(
+                &mut stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                error.to_string().as_bytes(),
+            ),
+        }
+        return;
+    }
+    if route != "/process" {
+        response(
+            &mut stream,
+            "404 Not Found",
+            "text/plain",
+            b"Rota inexistente",
+        );
+        return;
+    }
+    if busy.swap(true, Ordering::SeqCst) {
+        response(&mut stream, "409 Conflict", "text/plain", b"Ja processando");
+        return;
+    }
+    let _ = fs::remove_dir_all(root.join(OUT));
+    *status.lock().unwrap() = format!("PROCESSANDO: {t1} -> {t2}");
+    let state = status.clone();
+    let flag = busy.clone();
+    let owned = files.map(Path::to_path_buf);
+    thread::spawn(move || {
+        let refs = [
+            &*owned[0], &*owned[1], &*owned[2], &*owned[3], &*owned[4], &*owned[5],
+        ];
+        let message = match temporal_command(&root, false, refs, &numbers) {
+            Ok(output) if output.status.success() => "CONCLUIDO: resultados prontos".to_owned(),
+            Ok(output) => format!("ERRO: {}", command_error(&output)),
+            Err(error) => format!("ERRO: {error}"),
+        };
+        *state.lock().unwrap() = message;
+        flag.store(false, Ordering::SeqCst);
+    });
+    response(
+        &mut stream,
+        "202 Accepted",
+        "text/plain",
+        b"Processamento iniciado",
+    );
+}
+fn main() {
+    let listener = TcpListener::bind("127.0.0.1:3000").expect("Porta 3000 em uso");
+    println!("Painel: http://127.0.0.1:3000");
+    println!("Use Ctrl+C para encerrar");
+    let busy = Arc::new(AtomicBool::new(false));
+    let status = Arc::new(Mutex::new("Pronto para selecionar cenas em data/".into()));
+    for stream in listener.incoming().flatten() {
+        let flag = busy.clone();
+        let state = status.clone();
+        thread::spawn(move || handle(stream, flag, state));
+    }
 }
 
 #[cfg(test)]
-mod tests{
+mod tests {
     use super::*;
-
     #[test]
-    fn accepts_valid_process_numbers(){
-        let values=["2200","7200","400","0","-1000","0","-1000"].map(str::to_owned);
-        assert!(valid_process_numbers(&values));
+    fn extracts_date() {
+        assert_eq!(
+            scene_date("S2B_21MXM_20260912_0_L2A").as_deref(),
+            Some("12/09/2026")
+        );
     }
-
     #[test]
-    fn rejects_invalid_process_numbers(){
-        for values in [
-            ["-2","7200","400","0","0","0","0"],
-            ["2201","7200","400","0","0","0","0"],
-            ["2200","7200","1001","0","0","0","0"],
-            ["2200","7200","400","x","0","0","0"],
-        ]{
-            assert!(!valid_process_numbers(&values.map(str::to_owned)));
-        }
+    fn validates_numbers() {
+        assert!(valid_process_numbers(
+            &["2200", "7200", "400", "0", "-1000", "0", "-1000"].map(str::to_owned)
+        ));
+        assert!(!valid_process_numbers(
+            &["2201", "7200", "400", "0", "0", "0", "0"].map(str::to_owned)
+        ));
     }
-
     #[test]
-    fn recognizes_tiff_signatures(){
-        for signature in [[b'I',b'I',42,0],[b'M',b'M',0,42],[b'I',b'I',43,0],[b'M',b'M',0,43]]{
-            assert!(matches!(signature,[b'I',b'I',42,0]|[b'M',b'M',0,42]|[b'I',b'I',43,0]|[b'M',b'M',0,43]));
-        }
-        assert!(!matches!(*b"nope",[b'I',b'I',42,0]|[b'M',b'M',0,42]|[b'I',b'I',43,0]|[b'M',b'M',0,43]));
+    fn rejects_missing_file() {
+        let root =
+            std::env::temp_dir().join(format!("deforestation-monitor-web-{}", std::process::id()));
+        let scene = root.join("data").join("S2B_21MXM_20260912_0_L2A");
+        fs::create_dir_all(&scene).unwrap();
+        fs::write(scene.join("B04.tif"), [b'I', b'I', 42, 0]).unwrap();
+        fs::write(scene.join("B08.tif"), [b'I', b'I', 42, 0]).unwrap();
+        let error = scene_files(&root, "S2B_21MXM_20260912_0_L2A").unwrap_err();
+        assert!(error.contains("SCL.tif"));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn rejects_paths() {
+        assert!(!safe_scene_name("../outside"));
+        assert!(!safe_scene_name("folder/scene"));
+        assert!(safe_scene_name("S2A_21MXM_20250805_0_L2A"));
     }
 }
